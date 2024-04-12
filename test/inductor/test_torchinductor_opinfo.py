@@ -227,6 +227,7 @@ inductor_expected_failures_single_sample["cpu"] = {
     "sparse.sampled_addmm": {f32, f64},
     "to_sparse": {f32, f64},
     "view_as_complex": {f16},
+    "bfloat16": {f16},  # scheduler node do not support bf16/fp16 mix"
 }
 
 
