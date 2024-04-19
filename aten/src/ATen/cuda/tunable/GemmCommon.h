@@ -36,7 +36,7 @@ inline std::string BlasOpToString(BlasOp op) {
 template <typename T>
 struct GemmParams : OpParams {
   GemmParams() {
-    deep = false;
+    duplicate_inputs_ = false;
   }
 
   std::string Signature() const override {
@@ -66,7 +66,7 @@ struct GemmParams : OpParams {
       size_t b_size = sizeof(T) * ldb * ((transb == 'n' || transb == 'N') ? n : k);
       copy->a = static_cast<const T*>(c10::cuda::CUDACachingAllocator::raw_alloc(a_size));
       copy->b = static_cast<const T*>(c10::cuda::CUDACachingAllocator::raw_alloc(b_size));
-      copy->deep = true;
+      copy->duplicate_inputs_ = true;
     }
     return copy;
   }
@@ -74,7 +74,7 @@ struct GemmParams : OpParams {
   // only call on object returned by DeepCopy
   void Delete() {
     c10::cuda::CUDACachingAllocator::raw_delete(c);
-    if (deep) {
+    if (duplicate_inputs_) {
       c10::cuda::CUDACachingAllocator::raw_delete(const_cast<T*>(a));
       c10::cuda::CUDACachingAllocator::raw_delete(const_cast<T*>(b));
     }
@@ -123,13 +123,13 @@ struct GemmParams : OpParams {
   T* c;
   int64_t ldc;
 private:
-  bool deep;
+  bool duplicate_inputs_;
 };
 
 template <typename T>
 struct GemmStridedBatchedParams : OpParams {
   GemmStridedBatchedParams() {
-    deep = false;
+    duplicate_inputs_ = false;
   }
 
   std::string Signature() const override {
@@ -159,7 +159,7 @@ struct GemmStridedBatchedParams : OpParams {
       size_t b_size = sizeof(T) * stride_b * batch;
       copy->a = static_cast<const T*>(c10::cuda::CUDACachingAllocator::raw_alloc(a_size));
       copy->b = static_cast<const T*>(c10::cuda::CUDACachingAllocator::raw_alloc(b_size));
-      copy->deep = true;
+      copy->duplicate_inputs_ = true;
     }
     return copy;
   }
@@ -167,7 +167,7 @@ struct GemmStridedBatchedParams : OpParams {
   // only call on object returned by DeepCopy
   void Delete() {
     c10::cuda::CUDACachingAllocator::raw_delete(c);
-    if (deep) {
+    if (duplicate_inputs_) {
       c10::cuda::CUDACachingAllocator::raw_delete(const_cast<T*>(a));
       c10::cuda::CUDACachingAllocator::raw_delete(const_cast<T*>(b));
     }
@@ -220,7 +220,7 @@ struct GemmStridedBatchedParams : OpParams {
   int64_t stride_c;
   int64_t batch;
 private:
-  bool deep;
+  bool duplicate_inputs_;
 };
 
 } // namespace at::cuda::tunable
