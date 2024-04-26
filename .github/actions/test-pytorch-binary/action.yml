@@ -11,6 +11,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: "Pull test scripts updates"
+      if: inputs.build_environment == 'linux-s390x-binary-manywheel'
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -x
+        cd "${GITHUB_WORKSPACE}/builder"
+        # remove this step when this PR is merged
+        curl -o 1802.patch -L https://github.com/pytorch/builder/pull/1802.patch
+        patch -p1 -i 1802.patch
+
     - name: Test PyTorch binary
       shell: bash
       run: |
