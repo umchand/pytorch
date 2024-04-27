@@ -5,10 +5,7 @@ set -ex
 install_ubuntu() {
   apt-get update
   apt-get install -y --no-install-recommends \
-          libhiredis-dev \
-          libleveldb-dev \
-          liblmdb-dev \
-          libsnappy-dev
+          libhiredis-dev
 
   # Cleanup
   apt-get autoclean && apt-get clean
@@ -21,10 +18,7 @@ install_centos() {
   yum --enablerepo=extras install -y epel-release
 
   yum install -y \
-      hiredis-devel \
-      leveldb-devel \
-      lmdb-devel \
-      snappy-devel
+      hiredis-devel
 
   # Cleanup
   yum clean all

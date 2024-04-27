@@ -84,10 +84,7 @@ sudo zypper install \
 # Obtain optional dependencies that are usually useful to have.
 echo "Installing optional dependencies."
 sudo zypper install \
-  libleveldb-dev \
-  liblmdb-dev \
   libpython-dev \
-  libsnappy-dev \
   python-numpy \
   python-pip \
   python-protobuf
