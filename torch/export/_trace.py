@@ -20,9 +20,6 @@ from torch._export.non_strict_utils import (
     make_fake_params_buffers,
     produce_guards_and_solve_constraints,
 )
-from torch._export.passes.add_runtime_assertions_for_constraints_pass import (
-    _AddRuntimeAssertionsForInlineConstraintsPass,
-)
 from torch._export.passes.collect_tracepoints_pass import CollectTracepointsPass
 from torch._export.passes.lift_constants_pass import (
     ConstantAttrMap,
@@ -390,6 +387,37 @@ def _make_module_call_graph(
         inputs=[], outputs=[], in_spec=in_spec, out_spec=out_spec
     )
     return ret
+
+
+def _insert_deferred_runtime_asserts(
+    gm: torch.fx.GraphModule,
+    shape_env: ShapeEnv,
+    name: str,
+):
+    def node_metadata_hook(node: torch.fx.Node) -> None:
+        if node.op != "call_function":
+            return
+
+        arg_meta = [arg.meta for arg in node.args if isinstance(arg, torch.fx.Node)]
+        assert len(arg_meta) >= 1
+        arg_meta = arg_meta[0]
+
+        fake_args = [
+            arg.meta["val"] if isinstance(arg, torch.fx.Node) else arg
+            for arg in node.args
+        ]
+        fake_res = node.target(*fake_args)
+        node.meta["val"] = fake_res
+
+        node.meta["stack_trace"] = (
+            'File "torch/fx/passes/runtime_assert.py", line 24, '
+            "in insert_deferred_runtime_asserts"
+        )
+        node.meta["nn_module_stack"] = arg_meta.get("nn_module_stack", {})
+        node.meta["torch_fn"] = node.target
+
+    with gm.graph._set_node_metadata_hook(node_metadata_hook):
+        insert_deferred_runtime_asserts(gm, shape_env, name, export=True)
 
 
 def _export_to_torch_ir(
@@ -1039,6 +1067,13 @@ def _export(
                 pre_dispatch=pre_dispatch,
                 transform=_tuplify_outputs,
             )
+
+        _insert_deferred_runtime_asserts(
+            ep_non_strict.gm,
+            fake_mode.shape_env,
+            f"non strict exported program: {first_call_function_nn_module_stack(ep_non_strict.gm.graph)}",
+        )
+
         ep_non_strict.gm.meta["inline_constraints"] = {
             k: v
             for k, v in fake_mode.shape_env.var_to_range.items()
@@ -1116,12 +1151,6 @@ def _export(
             ),
             example_inputs=(args, kwargs),
             constants=ep_non_strict.constants,
-        )
-        insert_deferred_runtime_asserts(
-            exported_program.graph_module,
-            fake_mode.shape_env,
-            f"non strict exported program: {first_call_function_nn_module_stack(exported_program.graph)}",
-            export=True,
         )
         return exported_program
 
@@ -1308,10 +1337,10 @@ def _export(
         assert res is not None
         gm = res.graph_module
 
-    if len(range_constraints) > 0:
-        res = _AddRuntimeAssertionsForInlineConstraintsPass(range_constraints)(gm)
-        assert res is not None
-        gm = res.graph_module
+    # if len(range_constraints) > 0:
+    #     res = _AddRuntimeAssertionsForInlineConstraintsPass(range_constraints)(gm)
+    #     assert res is not None
+    #     gm = res.graph_module
 
     assert orig_out_spec is not None
     _verify_nn_module_stack(gm)

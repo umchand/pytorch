@@ -258,13 +258,9 @@ def insert_deferred_runtime_asserts(
                 # terribly difficult, chances are we could even fully
                 # normalise SymPy expressions... who knows.
 
+                # TODO: figure out if we need this
                 if i0 in shape_env.size_like:
-                    if export:
-                        graph.call_function(
-                            torch.ops.aten.sym_constrain_range_for_size,
-                            (symbol_to_proxy[i0].node,),
-                        )
-                    else:
+                    if not export:
                         graph.call_function(
                             torch._check_is_size, (symbol_to_proxy[i0].node,)
                         )
