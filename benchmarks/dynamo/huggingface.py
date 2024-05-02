@@ -76,7 +76,7 @@ BATCH_SIZE_KNOWN_MODELS = dict()
 
 
 # Get the list of models and their batch sizes
-MODELS_FILENAME = os.path.join(os.path.dirname(__file__), "huggingface_models_list.txt")
+MODELS_FILENAME = os.path.join(os.path.dirname(__file__), "huggingface_temp_list.txt")
 assert os.path.exists(MODELS_FILENAME)
 with open(MODELS_FILENAME, "r") as fh:
     lines = fh.readlines()
@@ -366,7 +366,8 @@ def rand_int_tensor(device, low, high, shape):
         requires_grad=False,
     )
 
-
+EXTRA_MODELS = {}
+"""
 EXTRA_MODELS = {
     "AllenaiLongformerBase": (
         AutoConfig.from_pretrained("allenai/longformer-base-4096"),
@@ -402,7 +403,7 @@ EXTRA_MODELS = {
     ),
 }
 
-
+"""
 class HuggingfaceRunner(BenchmarkRunner):
     def __init__(self):
         super().__init__()
@@ -490,6 +491,15 @@ class HuggingfaceRunner(BenchmarkRunner):
             model_cls, model, model_name, batch_size, device, include_loss_args=True
         )
 
+        import deepspeed
+        self.args.deepspeed_config = "/opt/pytorch/pytorch/ds_config.json" 
+        model, self.optimizer, _, _ = deepspeed.initialize(args=self.args,
+                                                     model=model,
+                                                     model_parameters=model.parameters())
+        model = model.to(device, dtype=dtype)
+        
+        if self.args.enable_activation_checkpointing:
+            model.gradient_checkpointing_enable()
         # So we can check for correct gradients without eliminating the dropout computation
         for attr in dir(config):
             if "drop" in attr and isinstance(getattr(config, attr), float):
@@ -557,15 +567,28 @@ class HuggingfaceRunner(BenchmarkRunner):
             return mod(**inputs)
 
     def forward_and_backward_pass(self, mod, inputs, collect_outputs=True):
+        #import time;
         cloned_inputs = clone_inputs(inputs)
         self.optimizer_zero_grad(mod)
-        with self.autocast():
-            pred = mod(**cloned_inputs)
-            loss = self.compute_loss(pred)
-        self.grad_scaler.scale(loss).backward()
-        self.optimizer_step()
+        #fwd_engine_start = time.time()
+        with torch.profiler.record_function("forward"):
+            with self.autocast():
+                loss = mod(**cloned_inputs)
+        #torch.cuda.synchronize()
+        #back_engine_start = time.time()
+        with torch.profiler.record_function("backward"):
+            mod.backward(loss[0])
+        #torch.cuda.synchronize()
+        #mod_engine_start = time.time()
+        with torch.profiler.record_function("model step"):
+            mod.step()
+        #torch.cuda.synchronize()
+        #self.optimizer.step()
+        #print("forward", back_engine_start - fwd_engine_start)
+        #print("backward", mod_engine_start -back_engine_start)
+        #print("step time", time.time()-mod_engine_start)
         if collect_outputs:
-            return collect_results(mod, pred, loss, cloned_inputs)
+            return collect_results(mod, loss, loss[0], cloned_inputs)
         return None
 
 
