@@ -16,6 +16,7 @@ import itertools
 import logging
 import math
 import operator
+import os
 import re
 import sys
 import threading
@@ -4947,3 +4948,55 @@ class PropagateUnbackedSymInts(torch.fx.Interpreter):
         result = super().run_node(n)
         rebind_unbacked(detect_fake_mode().shape_env, n, result)
         return result
+
+
+def _suggest_fixes_for_data_dependent_error(e):
+    match = re.search("data-dependent expression (.+) \(unhinted", e.args[0])
+    parsed_expr = match.group(1)
+
+    class PythonPrinter(sympy.printing.str.StrPrinter):
+        def _print_Relational(self, expr):
+            lhs = self.parenthesize(expr.lhs, sympy.printing.precedence.precedence(expr))
+            rel_op = expr.rel_op
+            rhs = self.parenthesize(expr.rhs, sympy.printing.precedence.precedence(expr))
+            return f"{lhs} {rel_op} {rhs}"
+
+    frame = inspect.currentframe()
+    while frame is not None:
+        if not frame.f_code.co_filename.startswith(os.path.dirname(inspect.getfile(torch))):
+            ns = {}
+            for var, val in frame.f_locals.items():
+                if isinstance(val, torch.SymInt):
+                    ns[str(val.node.expr)] = sympy.Symbol(var)
+            expr = sympy.sympify(parsed_expr, ns)
+            frame_summary = traceback.FrameSummary(
+                frame.f_code.co_filename,
+                frame.f_lineno,
+                frame.f_code.co_name,
+            )
+            msg = e.args[0]
+            msg += (
+                '\n\nUser Stack (most recent call last):\n' +
+                '  (snipped, see stack below for prefix)\n' +
+                ''.join(traceback.StackSummary.from_list([frame_summary]).format())
+            )
+            msg += f"\nSuggested fixes (please choose one of the following):"
+            suggested_fixes = [
+                f"torch._check({PythonPrinter().doprint(expr)})",
+                f"torch._check({PythonPrinter().doprint(sympy.Not(expr))})",
+            ]
+            for i, fix in enumerate(suggested_fixes):
+                msg += f"\n  {i+1}. {fix}"
+            e.args = (msg,)
+            break
+        frame = frame.f_back
+
+
+class DataDependentErrorHandler(torch.overrides.TorchFunctionMode):
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        try:
+            return func(*args, **kwargs)
+        except GuardOnDataDependentSymNode as e:
+            _suggest_fixes_for_data_dependent_error(e)
+            raise
