@@ -9,6 +9,8 @@
 # - `torch.nn.Parameter`
 # - `collections.Counter`
 # - `collections.OrderedDict`
+# Additionally, users can allowlist classes they have deemed as safe using
+# `_mark_safe_globals()` (`torch.serialization.mark_safe_globals`)
 
 # Based of https://github.com/python/cpython/blob/main/Lib/pickle.py
 # Expected to be useful for loading PyTorch model weights
@@ -19,6 +21,7 @@
 
 import functools as _functools
 from collections import Counter, OrderedDict
+from inspect import getattr_static
 from pickle import (
     APPEND,
     APPENDS,
@@ -59,10 +62,42 @@ from pickle import (
     UnpicklingError,
 )
 from struct import unpack
-from sys import maxsize
+from sys import maxsize, modules
+from types import ModuleType
 from typing import Any, Dict, List
 
 import torch
+
+_marked_safe_globals_list: List[Any] = []
+
+
+def _mark_safe_globals(safe_globals: List[Any]):
+    global _marked_safe_globals_list
+    _marked_safe_globals_list += safe_globals
+
+
+def _get_safe_globals() -> List[Any]:
+    global _marked_safe_globals_list
+    return _marked_safe_globals_list
+
+
+def _clear_safe_globals():
+    global _marked_safe_globals_list
+    _marked_safe_globals_list = []
+
+
+# Separate from _get_allowed_globals because of the lru_cache on _get_allowed_globals
+# For example if user had a script like
+#   torch.load(file_a)
+#   torch.serialization._mark_safe_globals([torch.foo])
+#   torch.load(file_b)
+# the dynamic additions to safe_globals would not be picked up by
+# _get_allowed_globals due to the lru_cache
+def _get_user_allowed_globals():
+    rc: Dict[str, Any] = {}
+    for f in _marked_safe_globals_list:
+        rc[f"{f.__module__}.{f.__name__}"] = f
+    return rc
 
 
 # Unpickling machinery
@@ -75,6 +110,7 @@ def _get_allowed_globals():
         "torch.serialization._get_layout": torch.serialization._get_layout,
         "torch.Size": torch.Size,
         "torch.Tensor": torch.Tensor,
+        "torch.device": torch.device,
     }
     # dtype
     for t in torch.storage._dtype_to_storage_type_map().keys():
@@ -113,6 +149,7 @@ def _get_allowed_globals():
         torch._utils._rebuild_sparse_tensor,
         torch._utils._rebuild_meta_tensor_no_storage,
         torch._utils._rebuild_nested_tensor,
+        torch._utils._rebuild_wrapper_subclass,
     ]:
         rc[f"torch._utils.{f.__name__}"] = f
 
@@ -151,8 +188,67 @@ class Unpickler:
                 full_path = f"{module}.{name}"
                 if full_path in _get_allowed_globals():
                     self.append(_get_allowed_globals()[full_path])
+                elif full_path in _get_user_allowed_globals():
+                    self.append(_get_user_allowed_globals()[full_path])
                 else:
-                    raise RuntimeError(f"Unsupported class {full_path}")
+                    # For tensor subclasses.
+                    if module == "__builtin__":
+                        raise RuntimeError(f"Unsupported class {full_path}")
+                    elif module not in modules:
+                        raise RuntimeError(
+                            f"Found global `{full_path}` in the checkpoint but `{module}` was "
+                            f"not found in `sys.modules`, please import `{name}` from `{module}` "
+                            f"if `{full_path}` is a tensor subclass and you trust the package "
+                            "that provides it."
+                        )
+                    else:
+                        # Check that module is really a ModuleType
+                        if not isinstance(modules[module], ModuleType):
+                            raise RuntimeError(
+                                f"Found GLOBAL {full_path} but sys.modules[{module}] is not a ModuleType, "
+                                f"got {type(modules[module])}."
+                            )
+
+                        class_type = getattr_static(modules[module], name)
+                        if isinstance(class_type, type) and issubclass(
+                            class_type, torch.Tensor
+                        ):
+                            # Is class_type.method overridable? class_type.method accesses should call PyInstanceMethod_Function   # noqa: B950
+                            # https://github.com/python/cpython/blob/a37b0932285b5e883b13a46ff2a32f15d7339894/Objects/classobject.c#L374  # noqa: B950
+
+                            # Tensor.__getattribute__ is called by the getattr call in `_rebuild_from_type_v2`
+                            custom_get_attr = (
+                                class_type.__getattribute__
+                                is not torch.Tensor.__getattribute__
+                            )
+                            # Tensor.__setstate__ might be called in `_rebuild_from_type_v2`
+                            custom_set_state = (
+                                class_type.__setstate__ is not torch.Tensor.__setstate__
+                            )
+                            # Tensor.__setattr__ might be called in `torch._utils._set_obj_state`
+                            custom_set_attr = (
+                                class_type.__setattr__ is not object.__setattr__
+                            )
+                            # tp_alloc is called by `Tensor._rebuild_wrapper_subclass` and `Tensor.as_subclass`
+                            custom_tp_alloc = not torch._C._check_tp_alloc_is_default(
+                                class_type
+                            )
+                            if (
+                                custom_get_attr
+                                or custom_set_attr
+                                or custom_set_state
+                                or custom_tp_alloc
+                            ):
+                                raise RuntimeError(
+                                    f"Trying to unpickle tensor subclass `{full_path}` that has defined a custom "
+                                    f"version for one of these methods __setstate__={custom_set_state} "
+                                    f"__getattribute__={custom_get_attr} __setattr__={custom_set_attr} or "
+                                    f"tp_alloc={custom_tp_alloc}. Please check whether these methods are "
+                                    "safe and allowlist them with `torch.serialization.mark_safe_globals` if so."
+                                )
+                            self.append(class_type)
+                        else:
+                            raise RuntimeError(f"Unsupported class {full_path}")
             elif key[0] == NEWOBJ[0]:
                 args = self.stack.pop()
                 cls = self.stack.pop()
@@ -162,7 +258,10 @@ class Unpickler:
             elif key[0] == REDUCE[0]:
                 args = self.stack.pop()
                 func = self.stack[-1]
-                if func not in _get_allowed_globals().values():
+                if (
+                    func not in _get_allowed_globals().values()
+                    and func not in _get_user_allowed_globals().values()
+                ):
                     raise RuntimeError(
                         f"Trying to call reduce for unrecognized function {func}"
                     )
