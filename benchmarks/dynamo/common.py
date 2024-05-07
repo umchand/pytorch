@@ -718,14 +718,21 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
     torch._dynamo.config.repro_tolerance = tolerance
 
     with maybe_profile(args.export_profiler_trace) as p:
-        if args.export_aot_inductor:
-            frozen_model_iter_fn = export_aot_inductor(
-                model, example_inputs, args.devices[0]
-            )
+        if False:
+            frozen_model_iter_fn = model_iter_fn
         else:
-            frozen_model_iter_fn = torch._dynamo.run(model_iter_fn)
+            if args.export_aot_inductor:
+                frozen_model_iter_fn = export_aot_inductor(
+                    model, example_inputs, args.devices[0]
+                )
+            else:
+                frozen_model_iter_fn = torch._dynamo.run(model_iter_fn)
 
-        prof_dir = f"/wkdir/profiler_outputs/ds_hf_performance_benchmark"
+
+        if False:
+            prof_dir = f"/wkdir/profiler_outputs/new_ds_hf_performance_benchmark"
+        else:
+            prof_dir = f"/wkdir/profiler_outputs/new_torch_hf_performance_benchmark"
         #if dist.get_rank() == 0:
         if os.path.exists(prof_dir):
             import shutil
@@ -768,7 +775,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
                 with maybe_mark_profile(p=p, mark="actual"):
                     timings[rep, 1], actual_output = timed(
                         model,
-                        model_iter_fn,
+                        frozen_model_iter_fn,
                         inputs,
                         return_result=True,
                         times=times,
@@ -776,7 +783,6 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
                    )
                 torch.cuda.synchronize()
                 prof.step()
-    #import pdb; pdb.set_trace()
                     
 
     if args.export_profiler_trace:
@@ -2870,6 +2876,9 @@ def parse_args(args=None):
         "--iterations-per-run", type=int, default=1, help=iterations_per_run_help
     )
     parser.add_argument(
+        "--ds_mode", type=bool, default=False
+    )
+    parser.add_argument(
         "--randomize-input",
         action="store_true",
         help="Whether to randomize the input values. Dimensions will be kept the same.",
@@ -3559,7 +3568,10 @@ def run(runner, args, original_dir=None):
     torch._dynamo.config.suppress_errors = args.suppress_errors
 
     if args.training:
-        runner.model_iter_fn = runner.forward_and_backward_pass
+        if False:
+            runner.model_iter_fn = runner.forward_and_backward_pass_ds
+        else:
+            runner.model_iter_fn = runner.forward_and_backward_pass
         runner.skip_models.update(runner.skip_not_suitable_for_training_models)
     else:
         runner.model_iter_fn = runner.forward_pass
