@@ -1,1 +1,1 @@
-./benchmarks/dynamo/huggingface.py --performance --training --amp --backend=inductor --output=huggingface_training.csv
+TORCH_LOGS="+dynamo" TORCHDYNAMO_VERBOSE=1 TORCH_COMPILE_DEBUG=1 ENABLE_DEEPSPEED=0 ./benchmarks/dynamo/huggingface.py --performance --training --amp --backend=inductor --explain --print-graph-breaks --output=/wkdir/torch_compile_performance/pytorch/ds_huggingface_training.csv

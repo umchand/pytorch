@@ -22,7 +22,6 @@ import sys
 import time
 import weakref
 from contextlib import contextmanager
-import deepspeed
 from typing import (
     Any,
     Callable,
@@ -39,6 +38,9 @@ from typing import (
 from unittest.mock import MagicMock
 
 from typing_extensions import Self
+
+import torch._dynamo.config
+import torch._dynamo.debug_utils
 
 if TYPE_CHECKING:
     from torch.onnx._internal.fx import diagnostics
@@ -76,6 +78,8 @@ from torch.utils._pytree import tree_map, tree_map_only
 
 from tqdm.auto import tqdm, trange
 
+import os
+
 try:
     import torch_xla
     import torch_xla.core.xla_model as xm
@@ -87,12 +91,13 @@ except ImportError:
     pass
 
 log = logging.getLogger(__name__)
-
 # We are primarily interested in TF32
 torch.backends.cuda.matmul.allow_tf32 = True
 
 # Suppress torch.profiler spam
 os.environ["KINETO_LOG_LEVEL"] = "5"
+
+enable_ds = int(os.environ["ENABLE_DEEPSPEED"])
 
 current_name = ""
 current_device = ""
@@ -718,7 +723,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
     torch._dynamo.config.repro_tolerance = tolerance
 
     with maybe_profile(args.export_profiler_trace) as p:
-        if False:
+        if enable_ds==1:
             frozen_model_iter_fn = model_iter_fn
         else:
             if args.export_aot_inductor:
@@ -726,13 +731,13 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
                     model, example_inputs, args.devices[0]
                 )
             else:
-                frozen_model_iter_fn = torch._dynamo.run(model_iter_fn)
+                frozen_model_iter_fn = torch.compile(model_iter_fn, backend = "inductor")
 
-
-        if False:
-            prof_dir = f"/wkdir/profiler_outputs/new_ds_hf_performance_benchmark"
+        
+        if enable_ds == 1:
+            prof_dir = f"/wkdir/profiler_outputs/ds_compile_hf"
         else:
-            prof_dir = f"/wkdir/profiler_outputs/new_torch_hf_performance_benchmark"
+            prof_dir = f"/wkdir/profiler_outputs/torch_compile_hf"
         #if dist.get_rank() == 0:
         if os.path.exists(prof_dir):
             import shutil
@@ -2169,11 +2174,11 @@ class BenchmarkRunner:
         #model = self.deepcopy_model(model)
         example_inputs = clone_inputs(example_inputs)
         model, example_inputs = self.cast_based_on_args(model, example_inputs)
-        try:
-            self.model_iter_fn(model, example_inputs)
-        except Exception as e:
-            print(f"Original Error: {str(e)}")
-            raise NotImplementedError("Eager model failed to run") from e
+        #try:
+        #    self.model_iter_fn(model, example_inputs)
+        #except Exception as e:
+        #    print(f"Original Error: {str(e)}")
+        #    raise NotImplementedError("Eager model failed to run") from e
 
     def maybe_cast(self, model, example_inputs):
         #model = self.deepcopy_model(model)
@@ -2666,11 +2671,16 @@ class BenchmarkRunner:
             #    t_1 = time.perf_counter()
             #    aot_compilation_time = t_1 - t_0
             #else:
-            #    optimized_model_iter_fn = optimize_ctx(self.model_iter_fn)
+            if enable_ds == 1:
+                optimized_model_iter_fn = self.model_iter_fn
+                #optimized_model_iter_fn = optimize_ctx(self.model_iter_fn)
+            else:
+                #optimized_model_iter_fn = optimize_ctx(self.model_iter_fn)
+                optimized_model_iter_fn = self.model_iter_fn
             aot_compilation_time = 1.0
 
             dynamo_latency, dynamo_peak_mem, dynamo_stats = warmup(
-                self.model_iter_fn,  model, example_inputs, "dynamo"
+                optimized_model_iter_fn,  model, example_inputs, "dynamo"
             )
             compilation_time = dynamo_latency - eager_latency + aot_compilation_time
             compression_ratio = (
@@ -3568,7 +3578,7 @@ def run(runner, args, original_dir=None):
     torch._dynamo.config.suppress_errors = args.suppress_errors
 
     if args.training:
-        if False:
+        if enable_ds == 1:
             runner.model_iter_fn = runner.forward_and_backward_pass_ds
         else:
             runner.model_iter_fn = runner.forward_and_backward_pass

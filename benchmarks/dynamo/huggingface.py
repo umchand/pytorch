@@ -466,8 +466,11 @@ class HuggingfaceRunner(BenchmarkRunner):
         use_eval_mode = self.args.use_eval_mode
         dtype = torch.float32
         reset_rng_state()
-        model_cls, config = self._get_model_cls_and_config(model_name)
+        model_cls, _ = self._get_model_cls_and_config(model_name)
         model = self._download_model(model_name)
+        from transformers import BertConfig, BertForMaskedLM
+        config = BertConfig(num_hidden_layers=1)
+        model = BertForMaskedLM(config)
         model = model.to(device, dtype=dtype)
         if self.args.enable_activation_checkpointing:
             model.gradient_checkpointing_enable()
@@ -491,12 +494,15 @@ class HuggingfaceRunner(BenchmarkRunner):
             model_cls, model, model_name, batch_size, device, include_loss_args=True
         )
 
-        import deepspeed
-        self.args.deepspeed_config = "/opt/pytorch/pytorch/ds_config.json" 
-        model, self.optimizer, _, _ = deepspeed.initialize(args=self.args,
+        import os
+        enable_ds = int(os.environ["ENABLE_DEEPSPEED"])
+        if enable_ds == 1:
+            import deepspeed
+            self.args.deepspeed_config = "/wkdir/torch_compile_performance/pytorch/benchmarks/dynamo/ds_config.json" 
+            model, self.optimizer, _, _ = deepspeed.initialize(args=self.args,
                                                      model=model,
                                                      model_parameters=model.parameters())
-        model = model.to(device, dtype=dtype)
+            model = model.to(device, dtype=dtype)
         
         if self.args.enable_activation_checkpointing:
             model.gradient_checkpointing_enable()
@@ -565,28 +571,39 @@ class HuggingfaceRunner(BenchmarkRunner):
     def forward_pass(self, mod, inputs, collect_outputs=True):
         with self.autocast():
             return mod(**inputs)
-
+    
     def forward_and_backward_pass(self, mod, inputs, collect_outputs=True):
-        #import time;
         cloned_inputs = clone_inputs(inputs)
         self.optimizer_zero_grad(mod)
-        #fwd_engine_start = time.time()
+        with torch.profiler.record_function("forward"):
+            with self.autocast():
+                pred = mod(**cloned_inputs)
+                loss = self.compute_loss(pred)
+            torch.cuda.synchronize()
+        with torch.profiler.record_function("backward"):
+            self.grad_scaler.scale(loss).backward()
+            torch.cuda.synchronize()
+
+        with torch.profiler.record_function("optimizer step"):
+            self.optimizer_step()
+            torch.cuda.synchronize()
+        if collect_outputs:
+            return collect_results(mod, pred, loss, cloned_inputs)
+        return None
+
+    def forward_and_backward_pass_ds(self, mod, inputs, collect_outputs=True):
+        cloned_inputs = clone_inputs(inputs)
+        self.optimizer_zero_grad(mod)
         with torch.profiler.record_function("forward"):
             with self.autocast():
                 loss = mod(**cloned_inputs)
-        #torch.cuda.synchronize()
-        #back_engine_start = time.time()
+            torch.cuda.synchronize()
         with torch.profiler.record_function("backward"):
             mod.backward(loss[0])
-        #torch.cuda.synchronize()
-        #mod_engine_start = time.time()
-        with torch.profiler.record_function("model step"):
+            torch.cuda.synchronize()
+        with torch.profiler.record_function("optimizer step"):
             mod.step()
-        #torch.cuda.synchronize()
-        #self.optimizer.step()
-        #print("forward", back_engine_start - fwd_engine_start)
-        #print("backward", mod_engine_start -back_engine_start)
-        #print("step time", time.time()-mod_engine_start)
+            torch.cuda.synchronize()
         if collect_outputs:
             return collect_results(mod, loss, loss[0], cloned_inputs)
         return None

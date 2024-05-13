@@ -1,1 +1,1 @@
-BertForMaskedLM,32
+BertForMaskedLM, 2
